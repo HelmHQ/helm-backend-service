@@ -38,27 +38,28 @@ logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 # --- Load API Keys (Cycling Logic) ---
 load_dotenv()
 
-# Load all possible keys
-POSSIBLE_KEYS = [
-    os.getenv("AIzaSyCH62vARuv43go-hLKQcVD1xkmxO9ePcmw"),
-    os.getenv("AIzaSyAiX4DngvqsCSYcCNuSvOfgJcaRaTuyKb0"),
-    os.getenv("AIzaSyCMubiEpsgHJYV_GzC12vluEv_yohbP4tQ"),
-    os.getenv("AIzaSyBOFE99_ioJOSyGswPRl-_DunE21Ddqit0"),
-    os.getenv("AIzaSyCCLSN9DIcXVl21JfRTP4q9lYV3fffpE60"),
-    os.getenv("AIzaSyDCLeX4NAnj4rk5mBBCbIyd0jSM1eWb-2k"),
-    os.getenv("AIzaSyBjys63rD45gI04GxRpqaMKl6o8oXCd78g"),
-    os.getenv("AIzaSyCziUpkpL2CKKURNPVl_62lnQ45RV86cUo"),
-    os.getenv("AIzaSyDzZzxgPmaO2bZ8mEHu4BfuDXguKyyUQAc"),
-    os.getenv("AIzaSyDH8n4hTOPQtDwREj2xkOzsksvZMmcWrsg")
-]
-# Filter out None values
-VALID_KEYS = [k for k in POSSIBLE_KEYS if k is not None]
+# 1. Load the single comma-separated string from environment
+api_keys_string = os.getenv("GOOGLE_API_KEYS")
+
+# 2. Parse it into a list
+if not api_keys_string:
+    # Fallback logic for local testing or legacy setup
+    single_key = os.getenv("GOOGLE_API_KEY")
+    if single_key:
+        VALID_KEYS = [single_key]
+    else:
+        raise EnvironmentError("No 'GOOGLE_API_KEYS' (or 'GOOGLE_API_KEY') found in environment variables.")
+else:
+    # Split by comma and strip whitespace from each key
+    VALID_KEYS = [k.strip() for k in api_keys_string.split(",") if k.strip()]
 
 if not VALID_KEYS:
-    raise EnvironmentError("No GOOGLE_API_KEYs found in environment variables.")
+    raise EnvironmentError("API Key list is empty after parsing.")
+
+print(f"✅ Loaded {len(VALID_KEYS)} API Keys.")
 
 def get_random_api_key():
-    """Returns a random API key from the pool."""
+    """Returns a random API key from the pool to distribute load."""
     return random.choice(VALID_KEYS)
 
 # Set an initial key for embeddings (embeddings are cheap/fast)
