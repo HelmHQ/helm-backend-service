@@ -4,6 +4,7 @@ import sys
 import re
 import joblib
 import random
+import json
 import numpy as np
 from dotenv import load_dotenv
 
@@ -11,7 +12,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # --- LangChain Imports ---
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
@@ -24,6 +25,14 @@ from langchain_core.runnables import RunnablePassthrough, RunnableMap, RunnableL
 import nltk
 from nltk.corpus import stopwords
 
+# --- Custom Engine Import ---
+# Ensure insight_engine.py is in the same directory
+try:
+    from insight_engine import InsightEngine
+except ImportError:
+    print("⚠ Warning: insight_engine.py not found. Insight generation will fail.")
+
+# --- Setup NLTK ---
 try:
     nltk.data.find('tokenizers/punkt')
     nltk.data.find('corpora/stopwords')
@@ -38,19 +47,14 @@ logging.getLogger().addHandler(logging.StreamHandler(stream=sys.stdout))
 # --- Load API Keys (Cycling Logic) ---
 load_dotenv()
 
-# 1. Load the single comma-separated string from environment
 api_keys_string = os.getenv("GOOGLE_API_KEYS")
-
-# 2. Parse it into a list
 if not api_keys_string:
-    # Fallback logic for local testing or legacy setup
     single_key = os.getenv("GOOGLE_API_KEY")
     if single_key:
         VALID_KEYS = [single_key]
     else:
         raise EnvironmentError("No 'GOOGLE_API_KEYS' (or 'GOOGLE_API_KEY') found in environment variables.")
 else:
-    # Split by comma and strip whitespace from each key
     VALID_KEYS = [k.strip() for k in api_keys_string.split(",") if k.strip()]
 
 if not VALID_KEYS:
@@ -59,10 +63,9 @@ if not VALID_KEYS:
 print(f"✅ Loaded {len(VALID_KEYS)} API Keys.")
 
 def get_random_api_key():
-    """Returns a random API key from the pool to distribute load."""
+    """Returns a random API key from the pool."""
     return random.choice(VALID_KEYS)
 
-# Set an initial key for embeddings (embeddings are cheap/fast)
 os.environ["GOOGLE_API_KEY"] = VALID_KEYS[0]
 
 
@@ -86,6 +89,9 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+
+class InsightRequest(BaseModel):
+    history: List[Dict[str, Any]]  # List of daily metrics from Flutter
 
 
 # ==========================================
@@ -113,7 +119,7 @@ if os.path.exists(DB_PATH):
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/text-embedding-004",
         task_type="retrieval_query",
-        google_api_key=VALID_KEYS[0] # Use primary key for embeddings
+        google_api_key=VALID_KEYS[0]
     )
     vector_store = Chroma(
         persist_directory=DB_PATH,
@@ -126,7 +132,7 @@ if os.path.exists(DB_PATH):
 else:
     print(f"WARNING: ChromaDB not found at {DB_PATH}. RAG endpoint will fail.")
 
-# --- Load Sentiment Analysis Models ---
+# --- Load Sentiment Models ---
 vectorizer = None
 sentiment_model = None
 emotion_names = [
@@ -154,7 +160,7 @@ except Exception as e:
 RAG_PROMPT_TEMPLATE = """
 You are 'Helm', a warm, empathetic, and supportive wellness companion. 
 
-*GUIDELINES:*
+GUIDELINES:
 1. Tone: Conversational, gentle, human-like. No academic jargon.
 2. Validation: Start by validating their feelings.
 3. Context: Use the user's stats ({recent_sentiment}, {avg_sleep} sleep) to personalize advice.
@@ -162,13 +168,13 @@ You are 'Helm', a warm, empathetic, and supportive wellness companion.
 5. Safety: If high risk, ignore this and provide crisis resources.
 6. Length: Keep under 100 words.
 
-*RETRIEVED KNOWLEDGE:*
+RETRIEVED KNOWLEDGE:
 {context}
 
-*CHAT HISTORY:*
+CHAT HISTORY:
 {chat_history_str}
 
-*USER QUERY:*
+USER QUERY:
 {question}
 """
 
@@ -186,7 +192,7 @@ def create_refined_query(input_data: dict) -> str:
 
 
 # ==========================================
-# Part 4: Sentiment Analysis Logic
+# Part 4: Logic Layers (Sentiment & Insights)
 # ==========================================
 
 def cleantext(text):
@@ -228,37 +234,31 @@ def predict_emotions_advanced(user_input):
 @app.post("/chat", response_model=ChatResponse)
 async def handle_chat_request(request: ChatRequest):
     """RAG Chatbot Endpoint with Pre-Router and Key Cycling"""
-    
     user_text = request.user_query.lower()
     
-    # --- 1. SAFETY ROUTER (Pre-Check) ---
+    # Safety Router
     risk_keywords = ["suicide", "kill myself", "want to die", "hurt myself", "end it all"]
     if any(word in user_text for word in risk_keywords):
         return ChatResponse(response="I'm hearing that you're in a lot of pain. Please know that you're not alone. If you are in danger, please call your local emergency number immediately or reach out to a crisis helpline.")
 
-    # --- 2. GREETING ROUTER (Pre-Check) ---
+    # Greeting Router
     greetings = ["hi", "hello", "hey", "greetings", "hola"]
-    # If message is just a greeting (short length)
     if any(word in user_text for word in greetings) and len(user_text) < 10:
         return ChatResponse(response="Hello! I'm Helm. I'm here to help you navigate your wellness journey. How are you feeling today?")
 
-    # --- 3. RAG PIPELINE (Gemini) ---
     if not retriever:
         raise HTTPException(status_code=503, detail="RAG system not initialized.")
 
     try:
-        # Select a fresh API key for this specific request
         current_key = get_random_api_key()
         
-        # Initialize LLM with the selected key
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash-preview-09-2025",
             temperature=0.7,
-            google_api_key=current_key, # Dynamic Key Assignment
+            google_api_key=current_key,
             convert_system_message_to_human=True
         )
         
-        # Re-build chain dynamically (lightweight operation)
         prompt_template = ChatPromptTemplate.from_template(RAG_PROMPT_TEMPLATE)
         
         chain = (
@@ -305,6 +305,84 @@ async def analyze_sentiment(request_data: dict):
 
     if not labels: labels = ["neutral"]
     return {"sentiments": labels, "scores": scores}
+
+
+# --- NEW: INSIGHT GENERATION ENDPOINT ---
+@app.post("/generate_insights")
+async def generate_insights(request: InsightRequest):
+    """
+    1. Takes user history (List of DailyMetrics).
+    2. Runs statistical tests via InsightEngine.
+    3. Uses Gemini to narrate the findings into friendly cards.
+    """
+    try:
+        # 1. Run Statistical Analysis
+        engine = InsightEngine(request.history)
+        raw_findings = engine.run_analysis()
+        
+        # Handle insufficient data case gracefully
+        if isinstance(raw_findings, dict) and "error" in raw_findings:
+             return [{
+                 "title": "Gathering Data",
+                 "summary": "I need a few more days of data to find patterns for you.",
+                 "icon": "hourglass_empty",
+                 "color": "grey"
+             }]
+
+        # 2. The "Narrative Layer" (LLM)
+        # We pick a fresh key for this heavy lifting
+        current_key = get_random_api_key()
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-preview-09-2025",
+            temperature=0.7,
+            google_api_key=current_key
+        )
+
+        prompt = f"""
+        You are a friendly data analyst for a mental health app.
+        
+        *INPUT DATA (Statistically Significant Correlations):*
+        {json.dumps(raw_findings, indent=2)}
+        
+        *YOUR TASK:*
+        Select the top 3 most interesting/actionable patterns from the list above.
+        Write a user-facing insight card for each.
+        
+        *OUTPUT FORMAT (Strict JSON List):*
+        [
+          {{
+            "title": "Short, catchy title (e.g. 'Social Media & Sleep')",
+            "summary": "One clear sentence explaining the pattern simply (e.g. 'On days you use Instagram more, your sleep quality tends to drop.')",
+            "icon": "Suggest a Flutter Material icon name (e.g. 'bedtime', 'phone_locked', 'sentiment_satisfied')",
+            "color": "Suggest a color name ('red', 'green', 'orange', 'blue', 'purple')"
+          }}
+        ]
+        
+        *RULES:*
+        - Do not use markdown formatting (no json). Just raw JSON.
+        - Be encouraging, never judgmental.
+        - If the correlation is positive/good, use green/blue. If negative/warning, use orange/red.
+        """
+
+        response = await llm.ainvoke(prompt)
+        content = response.content.strip()
+        
+        # Cleanup markdown if Gemini adds it despite instructions
+        if content.startswith("json"):
+            content = content.replace("json", "").replace("", "")
+            
+        insights_json = json.loads(content)
+        return insights_json
+
+    except Exception as e:
+        print(f"Insight Generation Error: {e}")
+        # Fallback so app doesn't crash
+        return [{
+            "title": "Analyzing Patterns",
+            "summary": "We are crunching the numbers. Check back later!",
+            "icon": "analytics",
+            "color": "blue"
+        }]
 
 
 @app.get("/")
