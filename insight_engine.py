@@ -58,7 +58,7 @@ class InsightEngine:
         """Expands JSON columns into analyzable features."""
         
         # A. Screen Time Categories
-        self.expand_json_column('screenTimeByCategory', prefix='cat')
+        self._expand_json_column('screenTimeByCategory', prefix='cat')
         
         # B. App Details (Filter < 300s)
         self._expand_app_details()
