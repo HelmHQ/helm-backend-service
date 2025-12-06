@@ -5,7 +5,7 @@ from scipy import stats
 from datetime import datetime
 
 class InsightEngine:
-    def _init_(self, raw_data_list):
+    def __init__(self, raw_data_list):
         """
         raw_data_list: List of dicts (DailyMetric objects from Flutter)
         """
