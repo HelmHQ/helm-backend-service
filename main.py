@@ -80,8 +80,10 @@ class ChatRequest(BaseModel):
     chat_history: List[ChatHistory]
     helm_context: HelmContext
 
+# --- UPDATED: Added suggestions field ---
 class ChatResponse(BaseModel):
     response: str
+    suggestions: List[str] = [] 
 
 class InsightRequest(BaseModel):
     history: List[Dict[str, Any]] 
@@ -127,26 +129,22 @@ router_store = None
 try:
     # 1. Define Anchors
     anchors = [
-        # Crisis Anchors (High Priority)
         Document(page_content="I want to kill myself", metadata={"intent": "crisis"}),
         Document(page_content="I want to die", metadata={"intent": "crisis"}),
         Document(page_content="I am suicidal", metadata={"intent": "crisis"}),
         Document(page_content="I'm going to end it all", metadata={"intent": "crisis"}),
         Document(page_content="I want to hurt myself", metadata={"intent": "crisis"}),
         
-        # Greeting Anchors
         Document(page_content="Hello", metadata={"intent": "greeting"}),
         Document(page_content="Hi there", metadata={"intent": "greeting"}),
         Document(page_content="Good morning", metadata={"intent": "greeting"}),
         Document(page_content="Hey Helm", metadata={"intent": "greeting"}),
         
-        # Gratitude Anchors
         Document(page_content="Thank you so much", metadata={"intent": "gratitude"}),
         Document(page_content="That was helpful", metadata={"intent": "gratitude"}),
         Document(page_content="Thanks", metadata={"intent": "gratitude"}),
     ]
     
-    # 2. Create in-memory vector store for routing
     router_embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", task_type="retrieval_query", google_api_key=VALID_KEYS[0])
     router_store = Chroma.from_documents(anchors, router_embeddings, collection_name="router_anchors")
     print("✅ Semantic Router Ready")
@@ -157,33 +155,40 @@ except Exception as e:
 # Part 3: Helpers
 # ==========================================
 
-RAG_PROMPT = """You are Helm, a warm, empathetic, and supportive wellness companion.
-GUIDELINES: Warm, conversational, validate feelings. Use user context. Base advice ONLY on retrieved articles.
+# --- UPDATED PROMPT: Request JSON Output ---
+RAG_PROMPT = """You are Helm, a warm, empathetic wellness companion.
+
+GUIDELINES: 
+1. Tone: Warm, conversational, validate feelings. 
+2. Use user context. 
+3. Base advice ONLY on retrieved articles.
+
 CONTEXT: {context}
 HISTORY: {chat_history_str}
-QUERY: {question}"""
+QUERY: {question}
 
-def format_docs(docs): 
-    return "\n\n".join(f"[Article]:\n{doc.page_content}..." for doc in docs)
+OUTPUT FORMAT:
+Return a JSON object with two keys:
+1. "answer": Your helpful text response.
+2. "suggestions": A list of 3 short follow-up questions the user might want to ask next.
+
+Example:
+{{
+  "answer": "Sleep is important because...",
+  "suggestions": ["How to sleep faster?", "Does blue light hurt sleep?", "Best wake up time?"]
+}}
+"""
+
+def format_docs(docs): return "\n\n".join(f"[Article]:\n{doc.page_content}..." for doc in docs)
 
 def format_history(history): 
-    """
-    Handle both dict and ChatHistory objects
-    """
-    if not history:
-        return "No history."
-    
+    if not history: return "No history."
     formatted = []
     for item in history:
-        # Handle dict (after model_dump())
         if isinstance(item, dict):
-            role = item.get("role", "unknown")
-            text = item.get("text", "")
-            formatted.append(f"{role}: {text}")
-        # Handle ChatHistory object (before model_dump())
+            formatted.append(f"{item.get('role', 'unknown')}: {item.get('text', '')}")
         else:
             formatted.append(f"{item.role}: {item.text}")
-    
     return "\n".join(formatted)
 
 def create_refined_query(input_data):
@@ -213,38 +218,40 @@ def predict_emotions(user_input):
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """Semantic Routing + RAG Chatbot"""
+    """Semantic Routing + RAG Chatbot with Suggestions"""
     
     # --- STEP 1: SEMANTIC ROUTING ---
     if router_store:
         try:
-            # Search for similar anchor
             results = router_store.similarity_search_with_score(request.user_query, k=1)
             if results:
                 doc, score = results[0]
-                
                 if score < 0.35:
                     intent = doc.metadata["intent"]
-                    
                     if intent == "crisis":
-                        return ChatResponse(response="I'm hearing that you're in a lot of pain. Please know that you're not alone. If you are in danger, please call your local emergency number immediately or reach out to a crisis helpline.")
-                    
+                        return ChatResponse(
+                            response="I'm hearing that you're in a lot of pain. Please know that you're not alone. If you are in danger, please call your local emergency number immediately.",
+                            suggestions=["Helplines", "Grounding techniques"]
+                        )
                     if intent == "greeting":
-                        return ChatResponse(response="Hello! I'm Helm. I'm here to help you navigate your wellness journey. How are you feeling today?")
-                        
+                        return ChatResponse(
+                            response="Hello! I'm Helm. I'm here to help you navigate your wellness journey. How are you feeling today?",
+                            suggestions=["I'm feeling anxious", "I need sleep tips", "Just checking in"]
+                        )
                     if intent == "gratitude":
-                        return ChatResponse(response="You're very welcome! I'm glad I could help. Is there anything else on your mind?")
+                        return ChatResponse(
+                            response="You're very welcome! Is there anything else on your mind?",
+                            suggestions=["Tell me about stress", "Improve focus", "Mood tracking"]
+                        )
         except Exception as e:
             print(f"Router Error: {e}")
             traceback.print_exc()
 
     # --- STEP 2: RAG PIPELINE ---
-    if not retriever: 
-        raise HTTPException(503, "RAG not initialized")
+    if not retriever: raise HTTPException(503, "RAG not initialized")
     
     try:
         current_key = get_random_api_key()
-        # FIXED: Changed from gemini-2.0-flash-exp to gemini-2.5-flash-preview-0503
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash-preview-09-2025", 
             temperature=0.7, 
@@ -264,10 +271,22 @@ async def chat(request: ChatRequest):
             | StrOutputParser()
         )
         
-        # Convert to dict for processing
-        request_dict = request.model_dump()
+        # Get raw response from LLM
+        raw_output = await chain.ainvoke(request.model_dump())
         
-        return ChatResponse(response=await chain.ainvoke(request_dict))
+        # Cleanup Markdown
+        cleaned_output = raw_output.replace("json", "").replace("", "").strip()
+        
+        try:
+            # Parse JSON
+            parsed = json.loads(cleaned_output)
+            return ChatResponse(
+                response=parsed.get("answer", "I couldn't generate an answer."),
+                suggestions=parsed.get("suggestions", [])
+            )
+        except json.JSONDecodeError:
+            # Fallback if Gemini returns plain text
+            return ChatResponse(response=cleaned_output, suggestions=[])
         
     except Exception as e:
         print(f"❌ Chat Error: {e}")
@@ -304,7 +323,6 @@ async def generate_insights(request: InsightRequest):
             }]
 
         current_key = get_random_api_key()
-        # FIXED: Changed from gemini-2.0-flash-exp to gemini-2.5-flash-preview-0503
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash-preview-09-2025",
             temperature=0.7,
@@ -314,13 +332,11 @@ async def generate_insights(request: InsightRequest):
         simplified_findings = []
         for f in raw_findings:
             simple = f.copy()
-            if 'chart_data' in simple:
-                del simple['chart_data'] 
+            if 'chart_data' in simple: del simple['chart_data'] 
             simplified_findings.append(simple)
 
         prompt = f"""
         You are a friendly data analyst for a wellness app.
-        
         INPUT (Statistical Findings):
         {json.dumps(simplified_findings, indent=2)}
         
@@ -332,30 +348,17 @@ async def generate_insights(request: InsightRequest):
         OUTPUT FORMAT (Strict JSON List):
         [
           {{
-            "title": "Short Title (e.g. 'Social & Sleep')",
+            "title": "Short Title",
             "summary": "One clear sentence explaining the finding.",
             "icon": "Flutter Icon Name",
             "color": "Color Name"
           }}
         ]
-        
-        RULES:
-        - JSON ONLY. No markdown.
-        - If finding is a TREND (type='trend'):
-            - Metric Good & Slope > 0 -> GREEN (Improving).
-            - Metric Bad & Slope > 0 -> RED (Worsening).
-            - Use icons 'trending_up', 'trending_down'.
-        - If finding is Correlation/T-Test:
-            - Good -> Green/Blue.
-            - Warning -> Orange/Red.
         """
 
         response = await llm.ainvoke(prompt)
-        content = response.content.strip()
+        content = response.content.strip().replace("json", "").replace("", "").strip()
         
-        if content.startswith("json"):
-            content = content.replace("json", "").replace("```", "").strip()
-            
         insights_json = json.loads(content)
         
         final_insights = []
@@ -379,5 +382,4 @@ async def generate_insights(request: InsightRequest):
         }]
 
 @app.get("/")
-def root(): 
-    return {"message": "Helm API Running"}
+def root(): return {"message": "Helm API Running"}
