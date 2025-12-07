@@ -5,6 +5,7 @@ import re
 import joblib
 import random
 import json
+import traceback # --- NEW: For better error logging
 import numpy as np
 from dotenv import load_dotenv
 
@@ -20,7 +21,6 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableMap, RunnableLambda
-# --- FIX: Correct Import for Document ---
 from langchain_core.documents import Document 
 
 # --- NLTK Imports ---
@@ -235,8 +235,11 @@ async def chat(request: ChatRequest):
             | llm
             | StrOutputParser()
         )
-        return ChatResponse(response=await chain.ainvoke(request.dict()))
+        # --- FIX: Use model_dump() instead of dict() for Pydantic v2 compatibility ---
+        return ChatResponse(response=await chain.ainvoke(request.model_dump()))
     except Exception as e:
+        # --- FIX: Print full traceback for debugging ---
+        traceback.print_exc()
         raise HTTPException(500, f"Error: {e}")
 
 @app.post("/analyze_sentiment")
@@ -334,6 +337,7 @@ async def generate_insights(request: InsightRequest):
 
     except Exception as e:
         print(f"Insight Error: {e}")
+        traceback.print_exc()
         return [{
             "title": "Analyzing...",
             "summary": "We are crunching the numbers. Check back later!",
