@@ -246,7 +246,7 @@ async def chat(request: ChatRequest):
         current_key = get_random_api_key()
         # FIXED: Changed from gemini-2.0-flash-exp to gemini-2.5-flash-preview-0503
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-preview-0503", 
+            model="gemini-2.5-flash-preview-09-2025", 
             temperature=0.7, 
             google_api_key=current_key
         )
@@ -306,7 +306,7 @@ async def generate_insights(request: InsightRequest):
         current_key = get_random_api_key()
         # FIXED: Changed from gemini-2.0-flash-exp to gemini-2.5-flash-preview-0503
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-preview-0503",
+            model="gemini-2.5-flash-preview-09-2025",
             temperature=0.7,
             google_api_key=current_key
         )
