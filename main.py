@@ -20,7 +20,8 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableMap, RunnableLambda
-from langchain.docstore.document import Document # For Anchor Routing
+# --- FIX: Correct Import for Document ---
+from langchain_core.documents import Document 
 
 # --- NLTK Imports ---
 import nltk
@@ -120,7 +121,7 @@ try:
 except Exception as e:
     print(f"Error loading models: {e}")
 
-# --- C. Initialize Semantic Router (NEW) ---
+# --- C. Initialize Semantic Router ---
 print("Initializing Semantic Router...")
 router_store = None
 try:
@@ -146,7 +147,6 @@ try:
     ]
     
     # 2. Create in-memory vector store for routing
-    # Note: We use a fresh embedding model instance
     router_embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", task_type="retrieval_query", google_api_key=VALID_KEYS[0])
     router_store = Chroma.from_documents(anchors, router_embeddings, collection_name="router_anchors")
     print("✅ Semantic Router Ready")
@@ -203,7 +203,6 @@ async def chat(request: ChatRequest):
                 doc, score = results[0]
                 # Chroma returns 'distance' (lower is better).
                 # Typically 0.0 is exact match. > 0.4 is getting irrelevant.
-                # Threshold: distance < 0.35 (roughly >85% similarity equivalent)
                 
                 if score < 0.35:
                     intent = doc.metadata["intent"]
