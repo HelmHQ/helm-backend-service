@@ -80,7 +80,6 @@ class ChatRequest(BaseModel):
     chat_history: List[ChatHistory]
     helm_context: HelmContext
 
-# --- UPDATED: Added suggestions field ---
 class ChatResponse(BaseModel):
     response: str
     suggestions: List[str] = [] 
@@ -155,7 +154,6 @@ except Exception as e:
 # Part 3: Helpers
 # ==========================================
 
-# --- UPDATED PROMPT: Request JSON Output ---
 RAG_PROMPT = """You are Helm, a warm, empathetic wellness companion.
 
 GUIDELINES: 
@@ -211,6 +209,17 @@ def predict_emotions(user_input):
             emotions.append((emotion_names[i], float(proba)))
     emotions.sort(key=lambda x: x[1], reverse=True)
     return emotions
+
+def extract_json(text):
+    """
+    Robustly extracts JSON from a string that might contain markdown or extra text.
+    """
+    text = text.strip()
+    # Try finding the first { or [ and the last } or ]
+    match = re.search(r'(\{.\}|\[.\])', text, re.DOTALL)
+    if match:
+        return match.group(1)
+    return text
 
 # ==========================================
 # Part 4: Endpoints
@@ -271,21 +280,16 @@ async def chat(request: ChatRequest):
             | StrOutputParser()
         )
         
-        # Get raw response from LLM
         raw_output = await chain.ainvoke(request.model_dump())
-        
-        # Cleanup Markdown
-        cleaned_output = raw_output.replace("json", "").replace("", "").strip()
+        cleaned_output = extract_json(raw_output)
         
         try:
-            # Parse JSON
             parsed = json.loads(cleaned_output)
             return ChatResponse(
                 response=parsed.get("answer", "I couldn't generate an answer."),
                 suggestions=parsed.get("suggestions", [])
             )
         except json.JSONDecodeError:
-            # Fallback if Gemini returns plain text
             return ChatResponse(response=cleaned_output, suggestions=[])
         
     except Exception as e:
@@ -354,10 +358,21 @@ async def generate_insights(request: InsightRequest):
             "color": "Color Name"
           }}
         ]
+        
+        RULES:
+        - JSON ONLY. No markdown.
+        - If finding is a TREND (type='trend'):
+            - Metric Good & Slope > 0 -> GREEN (Improving).
+            - Metric Bad & Slope > 0 -> RED (Worsening).
+            - Use icons 'trending_up', 'trending_down'.
+        - If finding is Correlation/T-Test:
+            - Good -> Green/Blue.
+            - Warning -> Orange/Red.
         """
 
         response = await llm.ainvoke(prompt)
-        content = response.content.strip().replace("json", "").replace("", "").strip()
+        # --- FIX: Use extract_json for robustness ---
+        content = extract_json(response.content)
         
         insights_json = json.loads(content)
         
