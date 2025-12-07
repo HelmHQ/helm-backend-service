@@ -5,7 +5,7 @@ import re
 import joblib
 import random
 import json
-import traceback # --- NEW: For better error logging
+import traceback
 import numpy as np
 from dotenv import load_dotenv
 
@@ -163,11 +163,32 @@ CONTEXT: {context}
 HISTORY: {chat_history_str}
 QUERY: {question}"""
 
-def format_docs(docs): return "\n\n".join(f"[Article]:\n{doc.page_content}..." for doc in docs)
-def format_history(history): return "\n".join(f"{item.role}: {item.text}" for item in history) if history else "No history."
+def format_docs(docs): 
+    return "\n\n".join(f"[Article]:\n{doc.page_content}..." for doc in docs)
+
+def format_history(history): 
+    """
+    FIXED: Handle both dict and ChatHistory objects
+    """
+    if not history:
+        return "No history."
+    
+    formatted = []
+    for item in history:
+        # Handle dict (after model_dump())
+        if isinstance(item, dict):
+            role = item.get("role", "unknown")
+            text = item.get("text", "")
+            formatted.append(f"{role}: {text}")
+        # Handle ChatHistory object (before model_dump())
+        else:
+            formatted.append(f"{item.role}: {item.text}")
+    
+    return "\n".join(formatted)
+
 def create_refined_query(input_data):
     ctx = input_data.get("helm_context")
-    return f"Sentiment: {ctx.recent_sentiment}. Sleep: {ctx.avg_sleep}. Query: {input_data.get('user_query')}"
+    return f"Sentiment: {ctx.get('recent_sentiment')}. Sleep: {ctx.get('avg_sleep')}. Query: {input_data.get('user_query')}"
 
 def cleantext(text):
     text = str(text).lower()
@@ -201,8 +222,6 @@ async def chat(request: ChatRequest):
             results = router_store.similarity_search_with_score(request.user_query, k=1)
             if results:
                 doc, score = results[0]
-                # Chroma returns 'distance' (lower is better).
-                # Typically 0.0 is exact match. > 0.4 is getting irrelevant.
                 
                 if score < 0.35:
                     intent = doc.metadata["intent"]
@@ -217,28 +236,40 @@ async def chat(request: ChatRequest):
                         return ChatResponse(response="You're very welcome! I'm glad I could help. Is there anything else on your mind?")
         except Exception as e:
             print(f"Router Error: {e}")
-            # Continue to RAG if router fails
+            traceback.print_exc()
 
     # --- STEP 2: RAG PIPELINE ---
-    if not retriever: raise HTTPException(503, "RAG not initialized")
+    if not retriever: 
+        raise HTTPException(503, "RAG not initialized")
     
     try:
         current_key = get_random_api_key()
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-preview-09-2025", temperature=0.7, google_api_key=current_key)
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash-exp", 
+            temperature=0.7, 
+            google_api_key=current_key
+        )
+        
         chain = (
-            {"context": RunnableLambda(create_refined_query) | retriever | RunnableLambda(format_docs),
-             "question": lambda x: x["user_query"],
-             "chat_history_str": lambda x: format_history(x["chat_history"]),
-             "recent_sentiment": lambda x: x["helm_context"].recent_sentiment,
-             "avg_sleep": lambda x: x["helm_context"].avg_sleep}
+            {
+                "context": RunnableLambda(create_refined_query) | retriever | RunnableLambda(format_docs),
+                "question": lambda x: x["user_query"],
+                "chat_history_str": lambda x: format_history(x["chat_history"]),
+                "recent_sentiment": lambda x: x["helm_context"].get("recent_sentiment", "N/A"),
+                "avg_sleep": lambda x: x["helm_context"].get("avg_sleep", "N/A")
+            }
             | ChatPromptTemplate.from_template(RAG_PROMPT)
             | llm
             | StrOutputParser()
         )
-        # --- FIX: Use model_dump() instead of dict() for Pydantic v2 compatibility ---
-        return ChatResponse(response=await chain.ainvoke(request.model_dump()))
+        
+        # Convert to dict for processing
+        request_dict = request.model_dump()
+        
+        return ChatResponse(response=await chain.ainvoke(request_dict))
+        
     except Exception as e:
-        # --- FIX: Print full traceback for debugging ---
+        print(f"❌ Chat Error: {e}")
         traceback.print_exc()
         raise HTTPException(500, f"Error: {e}")
 
@@ -273,7 +304,7 @@ async def generate_insights(request: InsightRequest):
 
         current_key = get_random_api_key()
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-preview-09-2025",
+            model="gemini-2.0-flash-exp",
             temperature=0.7,
             google_api_key=current_key
         )
@@ -288,15 +319,15 @@ async def generate_insights(request: InsightRequest):
         prompt = f"""
         You are a friendly data analyst for a wellness app.
         
-        *INPUT (Statistical Findings):*
+        INPUT (Statistical Findings):
         {json.dumps(simplified_findings, indent=2)}
         
-        *TASK:*
+        TASK:
         1. Read the statistical findings above.
         2. Select the top 3 most significant/interesting ones.
         3. Translate them into friendly, non-technical insight cards.
         
-        *OUTPUT FORMAT (Strict JSON List):*
+        OUTPUT FORMAT (Strict JSON List):
         [
           {{
             "title": "Short Title (e.g. 'Social & Sleep')",
@@ -306,7 +337,7 @@ async def generate_insights(request: InsightRequest):
           }}
         ]
         
-        *RULES:*
+        RULES:
         - JSON ONLY. No markdown.
         - If finding is a TREND (type='trend'):
             - Metric Good & Slope > 0 -> GREEN (Improving).
@@ -321,7 +352,7 @@ async def generate_insights(request: InsightRequest):
         content = response.content.strip()
         
         if content.startswith("json"):
-            content = content.replace("json", "").replace("```", "")
+            content = content.replace("json", "").replace("```", "").strip()
             
         insights_json = json.loads(content)
         
@@ -346,4 +377,5 @@ async def generate_insights(request: InsightRequest):
         }]
 
 @app.get("/")
-def root(): return {"message": "Helm API Running"}
+def root(): 
+    return {"message": "Helm API Running"}
