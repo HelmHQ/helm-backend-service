@@ -359,30 +359,35 @@ async def generate_insights(request: InsightRequest):
             simplified_findings.append(simple)
 
         prompt = f"""
-        You are a friendly data analyst for a mental health app.
-        
-        *INPUT (Statistical Findings):*
-        {json.dumps(simplified_findings, indent=2)}
-        
-        *TASK:*
-        1. Read the statistical findings above.
-        2. Generate a user-facing insight card for each item in the list (maintain the order).
-        
-        *OUTPUT FORMAT (Strict JSON List):*
-        [
-          {{
-            "title": "Short, catchy title (e.g. 'Social Media & Sleep')",
-            "summary": "One clear sentence explaining the pattern simply.",
-            "icon": "Suggest a Flutter Material icon name",
-            "color": "Suggest a color name ('red', 'green', 'orange', 'blue', 'purple')"
-          }}
-        ]
-        
-        *RULES:*
-        - JSON ONLY. No markdown.
-        - If finding is 'good', use Green/Blue.
-        - If finding is 'warning', use Orange/Red.
-        """
+                You are a friendly data analyst for a mental health app.
+                
+                *INPUT (Statistical Findings):*
+                {json.dumps(simplified_findings, indent=2)}
+                
+                *TASK:*
+                1. Read the statistical findings above.
+                2. Generate a user-facing insight card for each item in the list (maintain the order).
+                
+                *OUTPUT FORMAT (Strict JSON List):*
+                [
+                {{
+                    "title": "Short, catchy title (e.g. 'Sleep is Improving!' or 'Social & Sleep')",
+                    "summary": "One clear sentence explaining the pattern simply.",
+                    "icon": "Suggest a Flutter Material icon name",
+                    "color": "Suggest a color name ('red', 'green', 'orange', 'blue', 'purple')"
+                }}
+                ]
+                
+                *RULES:*
+                - JSON ONLY. No markdown.
+                - If finding is a TREND (type='trend'):
+                    - If Metric is Good (Sleep, Mood) & Slope > 0 -> GREEN (Improving).
+                    - If Metric is Bad (Stress) & Slope > 0 -> RED (Worsening).
+                    - Use icons like 'trending_up' or 'trending_down'.
+                - If finding is Correlation/T-Test:
+                    - If 'good', use Green/Blue.
+                    - If 'warning', use Orange/Red.
+                """
 
         response = await llm.ainvoke(prompt)
         content = response.content.strip()

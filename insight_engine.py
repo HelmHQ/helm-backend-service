@@ -20,12 +20,13 @@ class InsightEngine:
         self._preprocess()
         self._feature_engineering()
         
-        # Run statistical tests
+        # Run different types of analysis
         correlations = self._analyze_numerical_correlations()
         group_diffs = self._analyze_categorical_differences()
+        trends = self._analyze_trends() # --- NEW: TREND ANALYSIS ---
         
         # Combine all findings
-        all_insights = correlations + group_diffs
+        all_insights = correlations + group_diffs + trends
         
         # Sort by 'strength' (absolute value of correlation or effect size)
         all_insights.sort(key=lambda x: abs(x.get('strength', 0)), reverse=True)
@@ -37,6 +38,9 @@ class InsightEngine:
         # 1. Date Extraction
         if 'date' in self.df.columns:
             self.df['date_obj'] = pd.to_datetime(self.df['date'])
+            # Convert date to ordinal number for regression (Day 1, Day 2...)
+            self.df['date_ordinal'] = self.df['date_obj'].map(pd.Timestamp.toordinal)
+            
             self.df['day_of_week'] = self.df['date_obj'].dt.day_name()
             self.df['is_weekend'] = self.df['date_obj'].dt.dayofweek.apply(lambda x: 1 if x >= 5 else 0)
         
@@ -129,7 +133,6 @@ class InsightEngine:
         """Pearson Correlation for Metric vs Metric."""
         insights = []
         targets = ['sleepQuality', 'moodScore', 'stressScore', 'productivityScore', 'energyLevel']
-        # Features: Screen Time Cats, Specific Apps, Emotions, Passive Data
         feature_cols = [c for c in self.df.columns if c.startswith(('cat_', 'app_', 'emotion_', 'total', 'daily', 'entropy', 'appSwitch'))]
         
         for target in targets:
@@ -142,15 +145,10 @@ class InsightEngine:
                 if len(valid_data) < 3: continue 
                 if valid_data[feature].nunique() <= 1 or valid_data[target].nunique() <= 1: continue
 
-                # Pearson Correlation
                 corr, p_value = stats.pearsonr(valid_data[feature], valid_data[target])
                 
                 if abs(corr) > 0.4 and p_value < 0.15:
-                    # --- PREPARE SCATTER PLOT DATA ---
-                    # We normalize x values for cleaner plotting if needed, 
-                    # but sending raw values is better for tooltip context.
                     plot_points = []
-                    # Limit to last 30 points to keep payload small
                     recent_data = valid_data.tail(30)
                     for _, row in recent_data.iterrows():
                         plot_points.append({"x": float(row[feature]), "y": float(row[target])})
@@ -172,7 +170,7 @@ class InsightEngine:
         return insights
 
     def _analyze_categorical_differences(self):
-        """T-Test (Binary) and ANOVA (Multi-class)."""
+        """T-Test and ANOVA."""
         insights = []
         targets = ['sleepQuality', 'moodScore', 'stressScore', 'productivityScore', 'energyLevel']
         binary_cols = ['is_weekend', 'exercise', 'fragmentation']
@@ -189,13 +187,10 @@ class InsightEngine:
                     t_stat, p_value = stats.ttest_ind(group0, group1)
                     if p_value < 0.15: 
                         diff = group1.mean() - group0.mean()
-                        
-                        # --- PREPARE BAR CHART DATA ---
                         bar_data = [
                             {"label": f"No {col.capitalize()}", "value": round(group0.mean(), 2)},
                             {"label": f"{col.capitalize()}", "value": round(group1.mean(), 2)}
                         ]
-
                         insights.append({
                             "type": "t_test",
                             "feature": col,
@@ -220,8 +215,6 @@ class InsightEngine:
                     if p_value < 0.15:
                          means = self.df.groupby('dominantActivityTag')[target].mean()
                          best_activity = means.idxmax()
-                         
-                         # --- PREPARE BAR CHART DATA (Top 3 activities) ---
                          sorted_means = means.sort_values(ascending=False).head(4)
                          bar_data = [{"label": act, "value": round(val, 2)} for act, val in sorted_means.items()]
 
@@ -239,4 +232,58 @@ class InsightEngine:
                             }
                         })
                         
+        return insights
+
+    def _analyze_trends(self):
+        """
+        NEW: Linear Regression over time.
+        Detects if a metric is trending Up or Down over the date range.
+        """
+        insights = []
+        # Metrics to check for trends
+        metrics = ['sleepQuality', 'moodScore', 'stressScore', 'productivityScore', 'energyLevel', 'totalScreenOnTime', 'dailyStepCount']
+        
+        if 'date_ordinal' not in self.df.columns:
+            return []
+
+        for metric in metrics:
+            if metric not in self.df.columns: continue
+            
+            valid_data = self.df[['date_ordinal', metric]].dropna()
+            if len(valid_data) < 5: continue # Need history for a trend
+            
+            # Linear Regression (Time vs Metric)
+            slope, intercept, r_value, p_value, std_err = stats.linregress(valid_data['date_ordinal'], valid_data[metric])
+            
+            # Filter: Significant slope (p < 0.1) and r_value indicates fit strength
+            # Using slightly looser p-value for short-term user data trends
+            if p_value < 0.15 and abs(slope) > 0.05: # Slope threshold prevents flat lines being flagged
+                
+                # Prepare Line Chart Data
+                # Get actual data points sorted by date
+                sorted_data = valid_data.sort_values('date_ordinal')
+                plot_points = []
+                
+                # Convert ordinal back to readable date string for labels (optional) or index
+                # We'll use 0, 1, 2... for simplicity in scatter plot x-axis, or relative days
+                start_date = sorted_data['date_ordinal'].min()
+                
+                for _, row in sorted_data.iterrows():
+                    days_since_start = row['date_ordinal'] - start_date
+                    plot_points.append({"x": float(days_since_start), "y": float(row[metric])})
+
+                insights.append({
+                    "type": "trend",
+                    "feature": "Time",
+                    "target": metric,
+                    "strength": round(slope, 3), # Positive = Improving/Increasing
+                    "p_value": round(p_value, 3),
+                    "message": f"Trending {'Up' if slope > 0 else 'Down'} over time.",
+                    "chart_data": {
+                        "type": "scatter", # Reuse scatter plot, but points will be chronological
+                        "points": plot_points,
+                        "x_label": "Days",
+                        "y_label": metric
+                    }
+                })
         return insights
