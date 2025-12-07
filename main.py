@@ -308,12 +308,14 @@ async def analyze_sentiment(request_data: dict):
 
 
 # --- NEW: INSIGHT GENERATION ENDPOINT ---
+# --- NEW: INSIGHT GENERATION ENDPOINT ---
 @app.post("/generate_insights")
 async def generate_insights(request: InsightRequest):
     """
     1. Takes user history (List of DailyMetrics).
     2. Runs statistical tests via InsightEngine.
     3. Uses Gemini to narrate the findings into friendly cards.
+    4. Passes raw chart data back to frontend.
     """
     try:
         # 1. Run Statistical Analysis
@@ -328,9 +330,19 @@ async def generate_insights(request: InsightRequest):
                  "icon": "hourglass_empty",
                  "color": "grey"
              }]
+        
+        if not raw_findings:
+            return [{
+                "title": "No Patterns Yet",
+                "summary": "Your data is quite balanced right now! Keep tracking to see trends.",
+                "icon": "thumb_up",
+                "color": "blue"
+            }]
 
         # 2. The "Narrative Layer" (LLM)
-        # We pick a fresh key for this heavy lifting
+        # We need to preserve the chart_data because the LLM might mangle it.
+        # Strategy: We ask LLM to generate the text, and we map the chart_data back manually based on index.
+        
         current_key = get_random_api_key()
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash-preview-09-2025",
@@ -338,45 +350,65 @@ async def generate_insights(request: InsightRequest):
             google_api_key=current_key
         )
 
+        # Simplify findings for LLM (remove big chart data arrays to save tokens/confusion)
+        simplified_findings = []
+        for f in raw_findings:
+            simple = f.copy()
+            if 'chart_data' in simple:
+                del simple['chart_data'] # Don't send data points to LLM
+            simplified_findings.append(simple)
+
         prompt = f"""
         You are a friendly data analyst for a mental health app.
         
-        *INPUT DATA (Statistically Significant Correlations):*
-        {json.dumps(raw_findings, indent=2)}
+        *INPUT (Statistical Findings):*
+        {json.dumps(simplified_findings, indent=2)}
         
-        *YOUR TASK:*
-        Select the top 3 most interesting/actionable patterns from the list above.
-        Write a user-facing insight card for each.
+        *TASK:*
+        1. Read the statistical findings above.
+        2. Generate a user-facing insight card for each item in the list (maintain the order).
         
         *OUTPUT FORMAT (Strict JSON List):*
         [
           {{
             "title": "Short, catchy title (e.g. 'Social Media & Sleep')",
-            "summary": "One clear sentence explaining the pattern simply (e.g. 'On days you use Instagram more, your sleep quality tends to drop.')",
-            "icon": "Suggest a Flutter Material icon name (e.g. 'bedtime', 'phone_locked', 'sentiment_satisfied')",
+            "summary": "One clear sentence explaining the pattern simply.",
+            "icon": "Suggest a Flutter Material icon name",
             "color": "Suggest a color name ('red', 'green', 'orange', 'blue', 'purple')"
           }}
         ]
         
         *RULES:*
-        - Do not use markdown formatting (no json). Just raw JSON.
-        - Be encouraging, never judgmental.
-        - If the correlation is positive/good, use green/blue. If negative/warning, use orange/red.
+        - JSON ONLY. No markdown.
+        - If finding is 'good', use Green/Blue.
+        - If finding is 'warning', use Orange/Red.
         """
 
         response = await llm.ainvoke(prompt)
         content = response.content.strip()
         
-        # Cleanup markdown if Gemini adds it despite instructions
         if content.startswith("json"):
-            content = content.replace("json", "").replace("", "")
+            content = content.replace("json", "").replace("```", "")
             
         insights_json = json.loads(content)
-        return insights_json
+        
+        # 3. Re-attach Chart Data
+        # We assume LLM returned list in same order as input.
+        # We iterate and merge the chart_data back from raw_findings.
+        final_insights = []
+        for i, insight in enumerate(insights_json):
+            if i < len(raw_findings):
+                # Copy the LLM generated text
+                merged = insight.copy()
+                # Attach the raw math/chart data from the engine
+                if 'chart_data' in raw_findings[i]:
+                    merged['chart_data'] = raw_findings[i]['chart_data']
+                final_insights.append(merged)
+                
+        return final_insights
 
     except Exception as e:
         print(f"Insight Generation Error: {e}")
-        # Fallback so app doesn't crash
         return [{
             "title": "Analyzing Patterns",
             "summary": "We are crunching the numbers. Check back later!",
