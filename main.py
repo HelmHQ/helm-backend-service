@@ -82,7 +82,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
-    suggestions: List[str] = [] 
+    suggestions: List[str] = []
 
 class InsightRequest(BaseModel):
     history: List[Dict[str, Any]] 
@@ -126,7 +126,6 @@ except Exception as e:
 print("Initializing Semantic Router...")
 router_store = None
 try:
-    # 1. Define Anchors
     anchors = [
         Document(page_content="I want to kill myself", metadata={"intent": "crisis"}),
         Document(page_content="I want to die", metadata={"intent": "crisis"}),
@@ -157,37 +156,47 @@ except Exception as e:
 RAG_PROMPT = """You are Helm, a warm, empathetic wellness companion.
 
 GUIDELINES: 
-1. Tone: Warm, conversational, validate feelings. 
-2. Use user context. 
-3. Base advice ONLY on retrieved articles.
+1. Be warm and conversational
+2. Validate feelings
+3. Base advice ONLY on the retrieved articles provided below
 
-CONTEXT: {context}
-HISTORY: {chat_history_str}
-QUERY: {question}
+CONTEXT FROM ARTICLES:
+{context}
 
-OUTPUT FORMAT:
-Return a JSON object with two keys:
-1. "answer": Your helpful text response.
-2. "suggestions": A list of 3 short follow-up questions the user might want to ask next.
+CONVERSATION HISTORY:
+{chat_history_str}
 
-Example:
-{{
-  "answer": "Sleep is important because...",
-  "suggestions": ["How to sleep faster?", "Does blue light hurt sleep?", "Best wake up time?"]
-}}
+USER'S CURRENT STATE:
+- Recent Sentiment: {recent_sentiment}
+- Average Sleep: {avg_sleep}
+
+USER QUESTION: {question}
+
+CRITICAL INSTRUCTIONS FOR YOUR RESPONSE:
+You MUST respond with ONLY a valid JSON object in this exact format (no markdown, no code blocks, no extra text):
+
+{{"answer": "Your warm, helpful response here as natural text", "suggestions": ["Short question 1?", "Short question 2?", "Short question 3?"]}}
+
+Rules:
+- "answer" must be a natural, conversational response (NOT JSON inside)
+- "suggestions" must be an array of 3 short follow-up questions
+- Do NOT wrap in json or  
+- Do NOT add any text before or after the JSON
+- Ensure valid JSON syntax with proper quotes and escaping
 """
 
-def format_docs(docs): return "\n\n".join(f"[Article]:\n{doc.page_content}..." for doc in docs)
+def format_docs(docs): 
+    return "\n\n".join(f"[Article {i+1}]:\n{doc.page_content[:500]}..." for i, doc in enumerate(docs))
 
 def format_history(history): 
-    if not history: return "No history."
+    if not history: return "No previous conversation."
     formatted = []
     for item in history:
         if isinstance(item, dict):
             formatted.append(f"{item.get('role', 'unknown')}: {item.get('text', '')}")
         else:
             formatted.append(f"{item.role}: {item.text}")
-    return "\n".join(formatted)
+    return "\n".join(formatted[-6:])  # Last 6 messages only
 
 def create_refined_query(input_data):
     ctx = input_data.get("helm_context")
@@ -210,16 +219,65 @@ def predict_emotions(user_input):
     emotions.sort(key=lambda x: x[1], reverse=True)
     return emotions
 
-def extract_json(text):
+def extract_json_from_text(text):
     """
-    Robustly extracts JSON from a string that might contain markdown or extra text.
+    Robustly extract JSON from LLM response that might contain markdown or extra text.
     """
     text = text.strip()
-    # Try finding the first { or [ and the last } or ]
-    match = re.search(r'(\{.\}|\[.\])', text, re.DOTALL)
+    
+    # Remove markdown code blocks
+    text = re.sub(r'^json\s*', '', text)
+    text = re.sub(r'^\s*', '', text)
+    text = re.sub(r'\s*$', '', text)
+    text = text.strip()
+    
+    # Try to find JSON object boundaries
+    # Look for { ... } pattern
+    match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
-        return match.group(1)
+        potential_json = match.group(0)
+        try:
+            # Validate it's proper JSON
+            json.loads(potential_json)
+            return potential_json
+        except:
+            pass
+    
+    # If no match or invalid, return original
     return text
+
+def parse_llm_response(raw_text):
+    """
+    Parse LLM response and extract answer and suggestions.
+    Returns tuple: (answer_text, suggestions_list)
+    """
+    try:
+        # Clean the text first
+        cleaned = extract_json_from_text(raw_text)
+        
+        # Try parsing as JSON
+        parsed = json.loads(cleaned)
+        
+        if isinstance(parsed, dict):
+            answer = parsed.get("answer", "")
+            suggestions = parsed.get("suggestions", [])
+            
+            # Validate types
+            if not isinstance(answer, str):
+                answer = str(answer)
+            if not isinstance(suggestions, list):
+                suggestions = []
+            
+            return answer, suggestions
+        else:
+            # Not a dict, return as plain text
+            return cleaned, []
+            
+    except json.JSONDecodeError as e:
+        print(f"⚠ JSON Parse Error: {e}")
+        print(f"Raw text: {raw_text[:200]}")
+        # Fallback: return raw text
+        return raw_text, []
 
 # ==========================================
 # Part 4: Endpoints
@@ -235,34 +293,41 @@ async def chat(request: ChatRequest):
             results = router_store.similarity_search_with_score(request.user_query, k=1)
             if results:
                 doc, score = results[0]
+                
                 if score < 0.35:
                     intent = doc.metadata["intent"]
+                    
                     if intent == "crisis":
                         return ChatResponse(
-                            response="I'm hearing that you're in a lot of pain. Please know that you're not alone. If you are in danger, please call your local emergency number immediately.",
-                            suggestions=["Helplines", "Grounding techniques"]
+                            response="I'm hearing that you're in a lot of pain. Please know that you're not alone. If you are in danger, please call your local emergency number immediately or reach out to a crisis helpline.",
+                            suggestions=["Find helplines near me", "Grounding techniques", "Talk to someone"]
                         )
+                    
                     if intent == "greeting":
                         return ChatResponse(
-                            response="Hello! I'm Helm. I'm here to help you navigate your wellness journey. How are you feeling today?",
-                            suggestions=["I'm feeling anxious", "I need sleep tips", "Just checking in"]
+                            response="Hello! I'm Helm, your wellness companion. I'm here to help you navigate your wellness journey. How are you feeling today?",
+                            suggestions=["I'm feeling anxious", "I need sleep tips", "Help with stress"]
                         )
+                        
                     if intent == "gratitude":
                         return ChatResponse(
-                            response="You're very welcome! Is there anything else on your mind?",
-                            suggestions=["Tell me about stress", "Improve focus", "Mood tracking"]
+                            response="You're very welcome! I'm glad I could help. Is there anything else on your mind?",
+                            suggestions=["Tell me about stress", "Improve my focus", "Track my mood"]
                         )
         except Exception as e:
             print(f"Router Error: {e}")
             traceback.print_exc()
 
     # --- STEP 2: RAG PIPELINE ---
-    if not retriever: raise HTTPException(503, "RAG not initialized")
+    if not retriever: 
+        raise HTTPException(503, "RAG not initialized")
     
     try:
         current_key = get_random_api_key()
+        
+        # Use a valid Gemini model
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-preview-09-2025", 
+            model="gemini-2.5-flash-preview-09-2025",  # Changed to valid model
             temperature=0.7, 
             google_api_key=current_key
         )
@@ -280,22 +345,25 @@ async def chat(request: ChatRequest):
             | StrOutputParser()
         )
         
+        # Get raw output from LLM
         raw_output = await chain.ainvoke(request.model_dump())
-        cleaned_output = extract_json(raw_output)
         
-        try:
-            parsed = json.loads(cleaned_output)
-            return ChatResponse(
-                response=parsed.get("answer", "I couldn't generate an answer."),
-                suggestions=parsed.get("suggestions", [])
-            )
-        except json.JSONDecodeError:
-            return ChatResponse(response=cleaned_output, suggestions=[])
+        print(f"🔍 RAW LLM OUTPUT: {raw_output[:300]}")  # Debug log
+        
+        # Parse the response robustly
+        answer_text, suggestions_list = parse_llm_response(raw_output)
+        
+        print(f"✅ PARSED - Answer: {answer_text[:100]}, Suggestions: {suggestions_list}")  # Debug log
+        
+        return ChatResponse(
+            response=answer_text,
+            suggestions=suggestions_list
+        )
         
     except Exception as e:
         print(f"❌ Chat Error: {e}")
         traceback.print_exc()
-        raise HTTPException(500, f"Error: {e}")
+        raise HTTPException(500, f"Chat error: {str(e)}")
 
 @app.post("/analyze_sentiment")
 async def analyze(request: dict):
@@ -336,43 +404,39 @@ async def generate_insights(request: InsightRequest):
         simplified_findings = []
         for f in raw_findings:
             simple = f.copy()
-            if 'chart_data' in simple: del simple['chart_data'] 
+            if 'chart_data' in simple:
+                del simple['chart_data'] 
             simplified_findings.append(simple)
 
-        prompt = f"""
-        You are a friendly data analyst for a wellness app.
-        INPUT (Statistical Findings):
-        {json.dumps(simplified_findings, indent=2)}
+        prompt = f"""You are a friendly data analyst for a wellness app.
         
-        TASK:
-        1. Read the statistical findings above.
-        2. Select the top 3 most significant/interesting ones.
-        3. Translate them into friendly, non-technical insight cards.
-        
-        OUTPUT FORMAT (Strict JSON List):
-        [
-          {{
-            "title": "Short Title",
-            "summary": "One clear sentence explaining the finding.",
-            "icon": "Flutter Icon Name",
-            "color": "Color Name"
-          }}
-        ]
-        
-        RULES:
-        - JSON ONLY. No markdown.
-        - If finding is a TREND (type='trend'):
-            - Metric Good & Slope > 0 -> GREEN (Improving).
-            - Metric Bad & Slope > 0 -> RED (Worsening).
-            - Use icons 'trending_up', 'trending_down'.
-        - If finding is Correlation/T-Test:
-            - Good -> Green/Blue.
-            - Warning -> Orange/Red.
-        """
+INPUT (Statistical Findings):
+{json.dumps(simplified_findings, indent=2)}
+
+TASK:
+1. Read the statistical findings above.
+2. Select the top 3 most significant/interesting ones.
+3. Translate them into friendly, non-technical insight cards.
+
+OUTPUT FORMAT - You MUST return ONLY valid JSON array (no markdown, no code blocks):
+
+[
+  {{"title": "Short Title (e.g. 'Social & Sleep')", "summary": "One clear sentence explaining the finding.", "icon": "Flutter Icon Name", "color": "Color Name"}}
+]
+
+RULES:
+- JSON ONLY. No json or ``` wrapper.
+- If finding is a TREND (type='trend'):
+    - Metric Good & Slope > 0 -> GREEN (Improving).
+    - Metric Bad & Slope > 0 -> RED (Worsening).
+    - Use icons 'trending_up', 'trending_down'.
+- If finding is Correlation/T-Test:
+    - Good -> Green/Blue.
+    - Warning -> Orange/Red.
+"""
 
         response = await llm.ainvoke(prompt)
-        # --- FIX: Use extract_json for robustness ---
-        content = extract_json(response.content)
+        content = extract_json_from_text(response.content)
         
         insights_json = json.loads(content)
         
@@ -397,4 +461,5 @@ async def generate_insights(request: InsightRequest):
         }]
 
 @app.get("/")
-def root(): return {"message": "Helm API Running"}
+def root(): 
+    return {"message": "Helm API Running"}
