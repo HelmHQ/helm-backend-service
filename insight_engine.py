@@ -5,7 +5,7 @@ from scipy import stats
 from datetime import datetime
 
 class InsightEngine:
-    def __init__(self, raw_data_list):
+    def _init_(self, raw_data_list):
         """
         raw_data_list: List of dicts (DailyMetric objects from Flutter)
         """
@@ -23,7 +23,7 @@ class InsightEngine:
         # Run different types of analysis
         correlations = self._analyze_numerical_correlations()
         group_diffs = self._analyze_categorical_differences()
-        trends = self._analyze_trends() # --- NEW: TREND ANALYSIS ---
+        trends = self._analyze_trends()
         
         # Combine all findings
         all_insights = correlations + group_diffs + trends
@@ -31,8 +31,8 @@ class InsightEngine:
         # Sort by 'strength' (absolute value of correlation or effect size)
         all_insights.sort(key=lambda x: abs(x.get('strength', 0)), reverse=True)
         
-        # Return top 5 strongest statistically significant insights
-        return all_insights[:5]
+        # CHANGED: Return top 8 insights (ensures at least 5 after LLM filtering)
+        return all_insights[:8]
 
     def _preprocess(self):
         # 1. Date Extraction
@@ -67,7 +67,7 @@ class InsightEngine:
                 self.df[col] = self.df[col].fillna(fill_val)
 
     def _feature_engineering(self):
-        self._expand_json_column('screenTimeByCategory', prefix='cat')
+        self.expand_json_column('screenTimeByCategory', prefix='cat')
         self._expand_app_details()
         self._expand_sentiment()
 
@@ -236,7 +236,7 @@ class InsightEngine:
 
     def _analyze_trends(self):
         """
-        NEW: Linear Regression over time.
+        Linear Regression over time.
         Detects if a metric is trending Up or Down over the date range.
         """
         insights = []
@@ -250,22 +250,14 @@ class InsightEngine:
             if metric not in self.df.columns: continue
             
             valid_data = self.df[['date_ordinal', metric]].dropna()
-            if len(valid_data) < 5: continue # Need history for a trend
+            if len(valid_data) < 5: continue
             
             # Linear Regression (Time vs Metric)
             slope, intercept, r_value, p_value, std_err = stats.linregress(valid_data['date_ordinal'], valid_data[metric])
             
-            # Filter: Significant slope (p < 0.1) and r_value indicates fit strength
-            # Using slightly looser p-value for short-term user data trends
-            if p_value < 0.15 and abs(slope) > 0.05: # Slope threshold prevents flat lines being flagged
-                
-                # Prepare Line Chart Data
-                # Get actual data points sorted by date
+            if p_value < 0.15 and abs(slope) > 0.05:
                 sorted_data = valid_data.sort_values('date_ordinal')
                 plot_points = []
-                
-                # Convert ordinal back to readable date string for labels (optional) or index
-                # We'll use 0, 1, 2... for simplicity in scatter plot x-axis, or relative days
                 start_date = sorted_data['date_ordinal'].min()
                 
                 for _, row in sorted_data.iterrows():
@@ -276,11 +268,11 @@ class InsightEngine:
                     "type": "trend",
                     "feature": "Time",
                     "target": metric,
-                    "strength": round(slope, 3), # Positive = Improving/Increasing
+                    "strength": round(slope, 3),
                     "p_value": round(p_value, 3),
                     "message": f"Trending {'Up' if slope > 0 else 'Down'} over time.",
                     "chart_data": {
-                        "type": "scatter", # Reuse scatter plot, but points will be chronological
+                        "type": "scatter",
                         "points": plot_points,
                         "x_label": "Days",
                         "y_label": metric

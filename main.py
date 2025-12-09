@@ -404,8 +404,7 @@ async def generate_insights(request: InsightRequest):
         simplified_findings = []
         for f in raw_findings:
             simple = f.copy()
-            if 'chart_data' in simple:
-                del simple['chart_data'] 
+            if 'chart_data' in simple: del simple['chart_data'] 
             simplified_findings.append(simple)
 
         prompt = f"""You are a friendly data analyst for a wellness app.
@@ -415,24 +414,35 @@ INPUT (Statistical Findings):
 
 TASK:
 1. Read the statistical findings above.
-2. Select the top 3 most significant/interesting ones.
+2. Select ALL significant findings (aim for 5-8 insights).
 3. Translate them into friendly, non-technical insight cards.
 
 OUTPUT FORMAT - You MUST return ONLY valid JSON array (no markdown, no code blocks):
 
 [
-  {{"title": "Short Title (e.g. 'Social & Sleep')", "summary": "One clear sentence explaining the finding.", "icon": "Flutter Icon Name", "color": "Color Name"}}
+  {{"title": "Short Title (4-6 words)", "summary": "One clear friendly sentence.", "icon": "Flutter Icon Name", "color": "Color Name"}}
 ]
 
+ICON OPTIONS: bedtime, phone_locked, sentiment_satisfied, directions_run, work, notifications_off, trending_up, trending_down, analytics, thumb_up, lightbulb
+
+COLOR OPTIONS: red, green, orange, blue, purple, grey
+
 RULES:
-- JSON ONLY. No json or ``` wrapper.
+- JSON ONLY. No json or  wrapper.
+- Title must be SHORT and catchy (e.g., "Sleep & Social Media", "Weekend Mood Boost")
+- Summary must be ONE sentence, friendly tone
 - If finding is a TREND (type='trend'):
-    - Metric Good & Slope > 0 -> GREEN (Improving).
-    - Metric Bad & Slope > 0 -> RED (Worsening).
-    - Use icons 'trending_up', 'trending_down'.
-- If finding is Correlation/T-Test:
-    - Good -> Green/Blue.
-    - Warning -> Orange/Red.
+    - If metric is GOOD (sleep, mood, energy, productivity) & slope > 0 → GREEN + "trending_up"
+    - If metric is BAD (stress, screen time) & slope > 0 → RED + "trending_up" 
+    - If metric is GOOD & slope < 0 → RED + "trending_down"
+    - If metric is BAD & slope < 0 → GREEN + "trending_down"
+- If finding is Correlation:
+    - Positive correlation with good outcome → GREEN/BLUE
+    - Negative correlation causing harm → ORANGE/RED
+- If finding is T-Test/ANOVA:
+    - Beneficial difference → GREEN
+    - Concerning pattern → ORANGE/RED
+- Return 5-8 insights minimum
 """
 
         response = await llm.ainvoke(prompt)
@@ -440,13 +450,23 @@ RULES:
         
         insights_json = json.loads(content)
         
+        # Ensure we have at least 5 insights
+        if len(insights_json) < 5:
+            # Pad with generic insights if needed
+            while len(insights_json) < 5:
+                insights_json.append({
+                    "title": "Keep Going!",
+                    "summary": "You're building great wellness habits. Keep tracking to unlock more insights.",
+                    "icon": "thumb_up",
+                    "color": "blue"
+                })
+        
         final_insights = []
-        for i, insight in enumerate(insights_json):
-            if i < len(raw_findings):
-                merged = insight.copy()
-                if 'chart_data' in raw_findings[i]:
-                    merged['chart_data'] = raw_findings[i]['chart_data']
-                final_insights.append(merged)
+        for i, insight in enumerate(insights_json[:8]):  # Cap at 8
+            merged = insight.copy()
+            if i < len(raw_findings) and 'chart_data' in raw_findings[i]:
+                merged['chart_data'] = raw_findings[i]['chart_data']
+            final_insights.append(merged)
                 
         return final_insights
 
