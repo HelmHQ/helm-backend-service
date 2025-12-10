@@ -153,6 +153,40 @@ except Exception as e:
 # Part 3: Helpers
 # ==========================================
 
+def get_llm_with_fallback(temperature=0.7, api_key=None):
+    """
+    Try models in priority order, fallback to next if one fails.
+    Based on current stable models as of December 2025.
+    """
+    # Priority list: newest stable models first
+    MODEL_PRIORITY = [
+        os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),  # Primary (configurable)
+        "gemini-2.5-flash",      # Latest stable Flash (June 2026)
+        "gemini-2.5-pro",        # More powerful alternative (June 2026)
+        "gemini-2.0-flash",      # Older stable model (Feb 2026)
+    ]
+    
+    if not api_key:
+        api_key = get_random_api_key()
+    
+    for model in MODEL_PRIORITY:
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=model,
+                temperature=temperature,
+                google_api_key=api_key
+            )
+            # Test with a simple call to verify it works
+            test_response = llm.invoke("test")
+            logging.info(f"✓ Successfully connected using model: {model}")
+            return llm
+        except Exception as e:
+            logging.warning(f"✗ Model {model} failed: {str(e)}")
+            continue
+    
+    # If all models fail, raise error
+    raise Exception("All Gemini models failed. Check API key and connectivity.")
+
 RAG_PROMPT = """You are Helm, a warm, empathetic wellness companion.
 
 GUIDELINES: 
@@ -325,12 +359,8 @@ async def chat(request: ChatRequest):
     try:
         current_key = get_random_api_key()
         
-        # Use a valid Gemini model
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-preview-09-2025",  # Changed to valid model
-            temperature=0.7, 
-            google_api_key=current_key
-        )
+        # Use fallback function to get LLM
+        llm = get_llm_with_fallback(temperature=0.7, api_key=current_key)
         
         chain = (
             {
@@ -395,11 +425,9 @@ async def generate_insights(request: InsightRequest):
             }]
 
         current_key = get_random_api_key()
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-preview-09-2025",
-            temperature=0.7,
-            google_api_key=current_key
-        )
+        
+        # Use fallback function to get LLM
+        llm = get_llm_with_fallback(temperature=0.7, api_key=current_key)
 
         simplified_findings = []
         for f in raw_findings:
