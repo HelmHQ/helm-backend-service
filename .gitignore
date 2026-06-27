@@ -1,0 +1,12 @@
+# Virtual Environment
+venv/
+knowledge_base/
+# Secret Keys
+.env
+
+# Local Vector Database
+#chroma_db/
+main1.py
+
+# PyCharm
+.idea/
